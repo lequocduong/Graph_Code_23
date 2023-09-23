@@ -1,0 +1,111 @@
+#####################################################################################
+# Process each field to get BBs and evolution graphs
+# year_choice = 2020 # if we process all fields of a specific year (or a liste of years) and we comment line 62
+
+for sfd_id_choice in sfd_ids:
+    # ---------- Step 1 : Data acquisition
+    # get image file names of the season field id
+    
+    year_choice = fields_data[fields_data.sfd_id == sfd_id_choice].year.unique()[0] # different year for different fields
+    band_gil_file, band_tif_file, ndvi_tif_file = data_extractor(data_path, sfd_id_choice, year_choice)
+
+    if band_gil_file.size >= 2:  # each time series need at least 2 images
+        # ---------- Step 2 : Image data preprocessing
+        # prepare for ndvi image resizing, the 'mask_dict' saves an unified standard image size for the time series of a field
+        mask_dict, tif_info = resize_ndvi(data_path, ndvi_tif_file, sfd_id_choice)
+        
+        raster_df = []
+        date = []
+        todelete = []
+        for i in range(len(band_gil_file)):
+            # for each image in the satellite image time series for the sfd_id
+            if band_gil_file[i].split('_')[3] in ['Sentinel2', 'Landsat8']: # we choose only these 2 satellite capteurs
+                img_band_gil = data_path + str(sfd_id_choice)+ '/' + band_gil_file[i]
+                img_band_tif = data_path + str(sfd_id_choice) + '/' + band_tif_file[i]
+                img_ndvi_tif = data_path + str(sfd_id_choice) + '/' + ndvi_tif_file[i]  
+                # Bands and NDVI images are listed by the same date order
+                date.append(band_gil_file[i].split('_')[2]) 
+                
+                # raster band
+                bands_green_red_nir = get_band_order_GS2(img_band_gil, ['green', 'red', 'nir'])
+                raster_band = rasterio.open(img_band_tif)
+                raster_band_numpy = raster_band.read(bands_green_red_nir, masked=True) # attention masked # channel order meaning : (3, height, width)
+        
+                # raster ndvi
+                raster_ndvi = rasterio.open(img_ndvi_tif)
+                raster_ndvi_numpy = raster_ndvi.read(1, masked=True) # NDVI image only one channel
+                # resize the NDVI image to the standard size
+                raster_ndvi_numpy = resample(raster_ndvi_numpy, mask_dict[sfd_id_choice])   
+        
+                # resize bands image according to the already unified NDVI image of the same date
+                raster_resampled_1 = resample(raster_band_numpy[0,:,:], raster_ndvi_numpy).filled(np.nan)
+                raster_resampled_2 = resample(raster_band_numpy[1,:,:], raster_ndvi_numpy).filled(np.nan)
+                raster_resampled_3 = resample(raster_band_numpy[2,:,:], raster_ndvi_numpy).filled(np.nan)
+                raster_band_numpy_resampled = np.stack((raster_resampled_1, raster_resampled_2, raster_resampled_3), axis=0)
+                raster_band_numpy_resampled = np.ma.masked_invalid(raster_band_numpy_resampled) # channel : (3, height, width) # raster_band_numpy resampled with mask # not filled() 
+                
+        # ---------- Step 3 : Segmentation 
+                # parameter 'scale' can be set proportional to the number of valide pixels in this image
+                # num_valid_pixels = np.sum(~raster_band_numpy_resampled[0,:,:].mask)
+                # scale = num_valid_pixels//100
+        
+                # segment each band image 
+                raster_band_numpy_seg = np.transpose(raster_band_numpy_resampled, (1,2,0)) # channel : (width, height, 3) ndarray for segmentation of bande images
+                raster_band_numpy_seg = raster_band_numpy_seg.filled(-1)
+                segments_fz = felzenszwalb(raster_band_numpy_seg, scale=scale, sigma=sigma, min_size=min_size)
+        
+                raster_df.append([raster_band_numpy_seg, segments_fz, raster_ndvi_numpy])
+            else:
+                todelete.append(i)
+        band_tif_file = np.delete(band_tif_file, todelete, 0)
+        raster_df = pd.DataFrame(raster_df, index=pd.to_datetime(date, format='%Y-%m-%d'), columns=['raster_band_numpy_seg', 'segments_fz', 'raster_ndvi_numpy']).sort_index() # sort_index because the date labels may not be in order
+                    
+        # # save data for future analysis
+        # if not os.path.exists(save_path_df):
+        #     os.makedirs(save_path_df)
+        # raster_df.to_pickle(save_path_df+'{0}_{1}_scale_{2}_raster_seg_df.pkl'.format(sfd_id_choice,year_choice,scale))
+        
+        # ---------- Step 4 : Bounding Box selection
+        segments_test = raster_df['segments_fz']
+        raster_ndvi_numpy_test = raster_df['raster_ndvi_numpy']
+        bb_final_list_1 = construct_bb_set(segments_test, alpha, direction) # give min_bb_size if needed
+        
+        # ---------- Step 5 : Evolution graph construction            
+        ## Constraint final BB and construct graphs
+        bb_final_list = final_bb_constraint(bb_final_list_1, segments_test, t1, t2)
+    
+        ## delete BBs of invalid data (masked) zones
+        todelete = []
+        for i in range(bb_final_list.shape[0]):
+            date_choice = segments_test.index[bb_final_list[i,0]].strftime('%Y-%m-%d')
+            raster_ndvi_numpy = raster_df.loc[date_choice, 'raster_ndvi_numpy']
+            segments_fz = raster_df.loc[date_choice, 'segments_fz']
+            ###### delete graphs related to areas of masked invalid pixels 
+            if raster_ndvi_numpy.mask[segments_fz == bb_final_list[i,1]].size !=0 and sum(raster_ndvi_numpy.mask[segments_fz == bb_final_list[i,1]])/raster_ndvi_numpy.mask[segments_fz == bb_final_list[i,1]].size >= 0.9:
+                todelete.append(i)
+        bb_final_list = np.delete(bb_final_list, todelete, 0)
+        
+        # save data for future analysis
+        # if not os.path.exists(save_path_bb):
+        #     os.makedirs(save_path_bb)
+        # np.save(save_path_bb+'{0}_{1}_scale_{2}_alpha_{3}_t1_{4}_t2_{5}_final_bb.npy'.format(sfd_id_choice,year_choice,scale,alpha,t1,t2), bb_final_list)
+                
+        # create geodataframe of all BBs' coverage for each field and save it in shapefile
+        sdf = []
+        for idx in range(0, bb_final_list.shape[0]):
+            np_array = np.zeros(mask_dict[sfd_id_choice].shape, dtype=np.uint8)
+            np_array[segments_test.iloc[bb_final_list[idx, 0]] == bb_final_list[idx, 1]] = 1.0
+            df = pd.DataFrame(rio_shapes(np_array, transform=tif_info['transform']), columns=['geometry_dict', 'value'])
+            df = df[df.value > 0]
+            gdf = gpd.GeoDataFrame(df[['value']], geometry=df['geometry_dict'].apply(shape))
+            sdf.append([sfd_id_choice, str(bb_final_list[idx,0])+'_'+str(bb_final_list[idx,1]),
+                        date[bb_final_list[idx,0]], band_tif_file[bb_final_list[idx,0]], 
+                        bb_final_list[idx, 1], tif_info['EPSG'], MultiPolygon(gdf['geometry'].values)]) 
+        sdf = pd.DataFrame(sdf, columns=['sfd_id', 'BB_id', 'BB_date', 'BB_pos_img', 'BB_seg_id', 'EPSG', 'geometry']) 
+        sfd_bb_geo_df = gpd.GeoDataFrame(sdf, geometry=sdf['geometry'], crs="EPSG:{}".format(tif_info['EPSG'])).to_crs(4326)
+        
+        # save data for future analysis
+        # if not os.path.exists(save_path_shp):
+        #     os.makedirs(save_path_shp)
+        # sfd_bb_geo_df.to_file(save_path_shp+'{0}_{1}_scale_{2}_alpha_{3}_t1_{4}_t2_{5}_bbscover.shp'.format(sfd_id_choice,year_choice,scale,alpha,t1,t2))
+

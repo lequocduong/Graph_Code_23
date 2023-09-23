@@ -1,0 +1,25 @@
+    name: tillage-alexis
+    channels:
+     - conda-forge
+     - defaults
+    dependencies:
+     - pandas
+     - scipy
+     - requests
+     - matplotlib
+     - seaborn
+     - h5py 
+     - Pillow
+     - cx_Oracle
+     - lxml
+     - psycopg2
+     - pip
+     - pip:
+       - xmltodict
+       - vertica_python
+       - graypy
+       - click
+       - sklearn
+       - tsfresh
+       - geopandas
+
