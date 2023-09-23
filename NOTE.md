@@ -1,4 +1,4 @@
-# Graph_based_SITS_GEOSYS
+# Graph_based_SITS
 Codes for change detection in satellite image time series (SITS) by graph-based method with the improvement 
 # Optical Rescontruction signals
 Codes for Optical rescontruction signals by using Random Forest Regressor
